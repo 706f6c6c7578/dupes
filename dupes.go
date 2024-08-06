@@ -3,25 +3,20 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"os"
 	"strings"
+	"sync"
 )
 
 func main() {
-	// Read the big file from stdin
-	bigFileLines, err := readLinesFromStdin()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Read the small file from the command line argument
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <small_file>\n", os.Args[0])
+	// Read the small and big files from the command line arguments
+	if len(os.Args) < 3 {
+		fmt.Fprintf(os.Stderr, "Usage: %s <small_file> <big_file>\n", os.Args[0])
 		os.Exit(1)
 	}
 	smallFileName := os.Args[1]
+	bigFileName := os.Args[2]
+
 	smallFile, err := os.Open(smallFileName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening small file: %v\n", err)
@@ -29,16 +24,12 @@ func main() {
 	}
 	defer smallFile.Close()
 
-	// Check for duplicates
-	duplicates := 0
+	// Read the small file into memory
+	smallFileLines := make(map[string][]int)
 	scanner := bufio.NewScanner(smallFile)
 	for smallLineNum := 1; scanner.Scan(); smallLineNum++ {
 		line := strings.TrimSpace(scanner.Text())
-		if bigLineNums, found := bigFileLines[line]; found {
-			duplicates++
-			fmt.Printf("Duplicate found on line %d of the small file: %s\n", smallLineNum, line)
-			fmt.Printf("  Corresponds to line(s) in the big file: %v\n", bigLineNums)
-		}
+		smallFileLines[line] = append(smallFileLines[line], smallLineNum)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -46,23 +37,53 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Open the big file
+	bigFile, err := os.Open(bigFileName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening big file: %v\n", err)
+		os.Exit(1)
+	}
+	defer bigFile.Close()
+
+	// Create a wait group to wait for all goroutines to finish
+	var wg sync.WaitGroup
+	lineChan := make(chan string)
+
+	// Start a goroutine to read the big file
+	go func() {
+		defer close(lineChan)
+		scanner := bufio.NewScanner(bigFile)
+		for bigLineNum := 1; scanner.Scan(); bigLineNum++ {
+			line := strings.TrimSpace(scanner.Text())
+			lineChan <- line
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading big file: %v\n", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Start multiple goroutines to process lines from the big file
+	duplicates := 0
+	var mu sync.Mutex
+	for i := 0; i < 4; i++ { // Adjust the number of goroutines as needed
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for line := range lineChan {
+				if smallLineNums, found := smallFileLines[line]; found {
+					mu.Lock()
+					duplicates++
+					fmt.Printf("Duplicate found: %s\n", line)
+					fmt.Printf("  Corresponds to line(s) in the small file: %v\n", smallLineNums)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+
 	fmt.Printf("Total duplicates found: %d\n", duplicates)
 }
-
-func readLinesFromStdin() (map[string][]int, error) {
-	lines := make(map[string][]int)
-	reader := bufio.NewReader(os.Stdin)
-	for lineNum := 1; ; lineNum++ {
-		line, err := reader.ReadString('\n')
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		line = strings.TrimSpace(line)
-		lines[line] = append(lines[line], lineNum)
-	}
-	return lines, nil
-}
-
